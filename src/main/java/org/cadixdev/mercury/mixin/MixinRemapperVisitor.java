@@ -9,6 +9,7 @@ package org.cadixdev.mercury.mixin;
 import static org.cadixdev.mercury.mixin.util.MixinConstants.ACCESSOR_CLASS;
 import static org.cadixdev.mercury.mixin.util.MixinConstants.INJECT_CLASS;
 import static org.cadixdev.mercury.mixin.util.MixinConstants.OVERWRITE_CLASS;
+import static org.cadixdev.mercury.mixin.util.MixinConstants.PROXY_CLASS;
 import static org.cadixdev.mercury.mixin.util.MixinConstants.REDIRECT_CLASS;
 import static org.cadixdev.mercury.mixin.util.MixinConstants.SHADOW_CLASS;
 import static org.cadixdev.mercury.util.BombeBindings.convertType;
@@ -41,6 +42,7 @@ import org.eclipse.jdt.core.dom.Expression;
 import org.eclipse.jdt.core.dom.IAnnotationBinding;
 import org.eclipse.jdt.core.dom.IBinding;
 import org.eclipse.jdt.core.dom.IExtendedModifier;
+import org.eclipse.jdt.core.dom.IMemberValuePairBinding;
 import org.eclipse.jdt.core.dom.IMethodBinding;
 import org.eclipse.jdt.core.dom.ITypeBinding;
 import org.eclipse.jdt.core.dom.IVariableBinding;
@@ -256,6 +258,40 @@ public class MixinRemapperVisitor extends ASTVisitor {
                     }
                     else {
                         throw new RuntimeException("Unexpected annotation: " + rawAnnotation.getClass().getName());
+                    }
+                }
+            }
+
+            // @Proxy
+            if (Objects.equals(PROXY_CLASS, annotationType)) {
+                for (final IMemberValuePairBinding pair : annotation.getDeclaredMemberValuePairs()) {
+                    if (Objects.equals("value", pair.getName())) {
+                        final MethodTarget targetMethod = MethodTarget.of(pair.getValue().toString());
+                        final String targetMethodName = targetMethod.getMethodName();
+                        String deobf = targetMethodName + targetMethod.getMethodDescriptor()
+                                .map(MethodDescriptor::toString)
+                                .orElse("");
+                        for (final MethodMapping mapping : target.getMethodMappings()) {
+                            if (Objects.equals(targetMethodName, mapping.getObfuscatedName()) &&
+                                    targetMethod.getMethodDescriptor()
+                                            .map(d -> d.equals(mapping.getDescriptor()))
+                                            .orElse(true)) {
+                                final MethodSignature deobfuscatedSignature = mapping.getDeobfuscatedSignature();
+                                if (targetMethod.getMethodDescriptor().isPresent()) {
+                                    deobf = deobfuscatedSignature.getName() + deobfuscatedSignature.getDescriptor().toString();
+                                }
+                                else {
+                                    deobf = deobfuscatedSignature.getName();
+                                }
+                                break;
+                            }
+                        }
+                        // remap
+                        final SingleMemberAnnotation originalAnnotation = (SingleMemberAnnotation) node.modifiers().get(i);
+                        if (originalAnnotation.getValue() instanceof StringLiteral) {
+                            final StringLiteral original = (StringLiteral) originalAnnotation.getValue();
+                            replaceStringLiteral(ast, this.context, original, deobf);
+                        }
                     }
                 }
             }
