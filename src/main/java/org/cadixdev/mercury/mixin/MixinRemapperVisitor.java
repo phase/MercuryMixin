@@ -17,6 +17,7 @@ import static org.cadixdev.mercury.util.BombeBindings.convertType;
 import org.cadixdev.bombe.analysis.InheritanceProvider;
 import org.cadixdev.bombe.type.FieldType;
 import org.cadixdev.bombe.type.MethodDescriptor;
+import org.cadixdev.bombe.type.Type;
 import org.cadixdev.bombe.type.VoidType;
 import org.cadixdev.bombe.type.signature.FieldSignature;
 import org.cadixdev.bombe.type.signature.MethodSignature;
@@ -30,7 +31,7 @@ import org.cadixdev.mercury.mixin.annotation.AccessorData;
 import org.cadixdev.mercury.mixin.annotation.AccessorName;
 import org.cadixdev.mercury.mixin.annotation.AtData;
 import org.cadixdev.mercury.mixin.annotation.InjectData;
-import org.cadixdev.mercury.mixin.annotation.MethodTarget;
+import org.cadixdev.mercury.mixin.annotation.InjectTarget;
 import org.cadixdev.mercury.mixin.annotation.MixinClass;
 import org.cadixdev.mercury.mixin.annotation.ShadowData;
 import org.cadixdev.mercury.util.BombeBindings;
@@ -266,26 +267,9 @@ public class MixinRemapperVisitor extends ASTVisitor {
             if (Objects.equals(PROXY_CLASS, annotationType)) {
                 for (final IMemberValuePairBinding pair : annotation.getDeclaredMemberValuePairs()) {
                     if (Objects.equals("value", pair.getName())) {
-                        final MethodTarget targetMethod = MethodTarget.of(pair.getValue().toString());
-                        final String targetMethodName = targetMethod.getMethodName();
-                        String deobf = targetMethodName + targetMethod.getMethodDescriptor()
-                                .map(MethodDescriptor::toString)
-                                .orElse("");
-                        for (final MethodMapping mapping : target.getMethodMappings()) {
-                            if (Objects.equals(targetMethodName, mapping.getObfuscatedName()) &&
-                                    targetMethod.getMethodDescriptor()
-                                            .map(d -> d.equals(mapping.getDescriptor()))
-                                            .orElse(true)) {
-                                final MethodSignature deobfuscatedSignature = mapping.getDeobfuscatedSignature();
-                                if (targetMethod.getMethodDescriptor().isPresent()) {
-                                    deobf = deobfuscatedSignature.getName() + deobfuscatedSignature.getDescriptor().toString();
-                                }
-                                else {
-                                    deobf = deobfuscatedSignature.getName();
-                                }
-                                break;
-                            }
-                        }
+                        final InjectTarget injectTarget = InjectTarget.of(pair.getValue().toString());
+                        String deobf = remapInjectTarget(target, injectTarget)
+                                .orElse(injectTarget.getFullTarget());
                         // remap
                         final SingleMemberAnnotation originalAnnotation = (SingleMemberAnnotation) node.modifiers().get(i);
                         if (originalAnnotation.getValue() instanceof StringLiteral) {
@@ -302,31 +286,11 @@ public class MixinRemapperVisitor extends ASTVisitor {
 
                 // Find target method(s?)
                 // todo: implement selectors
-                final String[] method = new String[inject.getMethodTargets().length];
-                for (int j = 0; j < inject.getMethodTargets().length; j++) {
-                    final MethodTarget targetMethod = inject.getMethodTargets()[j];
-                    final String targetMethodName = targetMethod.getMethodName();
-                    String deobf = targetMethodName + targetMethod.getMethodDescriptor()
-                            .map(MethodDescriptor::toString)
-                            .orElse("");
-
-                    for (final MethodMapping mapping : target.getMethodMappings()) {
-                        if (Objects.equals(targetMethodName, mapping.getObfuscatedName()) &&
-                                targetMethod.getMethodDescriptor()
-                                        .map(d -> d.equals(mapping.getDescriptor()))
-                                        .orElse(true)) {
-                            final MethodSignature deobfuscatedSignature = mapping.getDeobfuscatedSignature();
-                            if (targetMethod.getMethodDescriptor().isPresent()) {
-                                deobf = deobfuscatedSignature.getName() + deobfuscatedSignature.getDescriptor().toString();
-                            }
-                            else {
-                                deobf = deobfuscatedSignature.getName();
-                            }
-                            break;
-                        }
-                    }
-
-                    method[j] = deobf;
+                final String[] injectTargets = new String[inject.getInjectTargets().length];
+                for (int j = 0; j < inject.getInjectTargets().length; j++) {
+                    final InjectTarget injectTarget = inject.getInjectTargets()[j];
+                    injectTargets[j] = remapInjectTarget(target, injectTarget)
+                            .orElse(injectTarget.getFullTarget());
                 }
 
                 final NormalAnnotation originalAnnotation = (NormalAnnotation) node.modifiers().get(i);
@@ -338,13 +302,13 @@ public class MixinRemapperVisitor extends ASTVisitor {
                     if (Objects.equals("method", pair.getName().getIdentifier())) {
                         if (pair.getValue() instanceof StringLiteral) {
                             final StringLiteral original = (StringLiteral) pair.getValue();
-                            replaceStringLiteral(ast, this.context, original, method[0]);
+                            replaceStringLiteral(ast, this.context, original, injectTargets[0]);
                         }
                         else {
                             final ArrayInitializer array = (ArrayInitializer) pair.getValue();
                             for (int j = 0; j < array.expressions().size(); j++) {
                                 final StringLiteral original = (StringLiteral) array.expressions().get(j);
-                                replaceStringLiteral(ast, this.context, original, method[j]);
+                                replaceStringLiteral(ast, this.context, original, injectTargets[j]);
                             }
                         }
                     }
@@ -380,6 +344,53 @@ public class MixinRemapperVisitor extends ASTVisitor {
         return true;
     }
 
+    private Optional<String> remapInjectTarget(final ClassMapping<?, ?> target, final InjectTarget injectTarget) {
+        final String targetName = injectTarget.getTargetName();
+
+        if (injectTarget.getFieldType().isPresent()) {
+            // this is targeting a field
+            final Type fieldType = injectTarget.getFieldType().get();
+            for (final FieldMapping mapping : target.getFieldMappings()) {
+                if (Objects.equals(targetName, mapping.getObfuscatedName())) {
+                    if (mapping.getType().isPresent() && !Objects.equals(mapping.getType().get(), fieldType)) {
+                        // the mapping has a type but it is different than the target type
+                        continue;
+                    }
+
+                    final FieldSignature deobfuscatedSignature = mapping.getDeobfuscatedSignature();
+                    final String deobfuscatedFieldType = deobfuscatedSignature.getType()
+                            .map(FieldType::toString)
+                            .orElse(null);
+                    String deobf;
+                    if (deobfuscatedFieldType != null) {
+                        deobf = deobfuscatedSignature.getName() + ":" + deobfuscatedFieldType;
+                    } else {
+                        deobf = deobfuscatedSignature.getName();
+                    }
+                    return Optional.of(deobf);
+                }
+            }
+        } else {
+            // this is probably targeting a method
+            for (final MethodMapping mapping : target.getMethodMappings()) {
+                if (Objects.equals(targetName, mapping.getObfuscatedName()) &&
+                        injectTarget.getMethodDescriptor()
+                                .map(d -> d.equals(mapping.getDescriptor()))
+                                .orElse(true)) {
+                    final MethodSignature deobfuscatedSignature = mapping.getDeobfuscatedSignature();
+                    String deobf;
+                    if (injectTarget.getMethodDescriptor().isPresent()) {
+                        deobf = deobfuscatedSignature.getName() + deobfuscatedSignature.getDescriptor().toString();
+                    } else {
+                        deobf = deobfuscatedSignature.getName();
+                    }
+                    return Optional.of(deobf);
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
     private void remapAtAnnotation(final AST ast, final ITypeBinding declaringClass, final NormalAnnotation atAnnotation, final AtData atDatum) {
         for (final Object atRaw : atAnnotation.values()) {
             // this will always be a MemberValuePair
@@ -399,17 +410,26 @@ public class MixinRemapperVisitor extends ASTVisitor {
                     final String deobfTargetClass = atTargetMappings.getFullDeobfuscatedName();
 
                     if (atDatum.getTarget().isPresent()) {
+                        remapInjectTarget(atTargetMappings, atDatum.getTarget().get());
                         // class name + method signature
-                        final MethodTarget atTarget = atDatum.getTarget().get();
+                        final InjectTarget atTarget = atDatum.getTarget().get();
                         final Optional<MethodDescriptor> methodDescriptor = atTarget.getMethodDescriptor();
+                        final Optional<Type> fieldType = atTarget.getFieldType();
                         // the method descriptor should always be present in an @At's target
                         if (methodDescriptor.isPresent()) {
-                            final MethodMapping methodMapping = atTargetMappings.getMethodMapping(atTarget.getMethodName(), methodDescriptor.get().toString()).orElse(null);
+                            final MethodMapping methodMapping = atTargetMappings.getMethodMapping(atTarget.getTargetName(), methodDescriptor.get().toString()).orElse(null);
                             if (methodMapping == null) continue;
 
                             // replace the original literal with class + method + method sig
                             final MethodSignature deobfuscatedSignature = methodMapping.getDeobfuscatedSignature();
                             final String deobfTargetSig = deobfuscatedSignature.getName() + deobfuscatedSignature.getDescriptor().toString();
+                            final String deobfTarget = "L" + deobfTargetClass + ";" + deobfTargetSig;
+                            replaceStringLiteral(ast, this.context, originalTarget, deobfTarget);
+                        } else if (fieldType.isPresent()) {
+                            final FieldMapping fieldMapping = atTargetMappings.getFieldMapping(atTarget.getTargetName()).orElse(null);
+                            if (fieldMapping == null) continue;
+
+                            final String deobfTargetSig = fieldMapping.getDeobfuscatedName() + ":" + fieldType.get();
                             final String deobfTarget = "L" + deobfTargetClass + ";" + deobfTargetSig;
                             replaceStringLiteral(ast, this.context, originalTarget, deobfTarget);
                         }
